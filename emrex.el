@@ -447,6 +447,29 @@ Not after the command's own frame went: Rex picks the pane to focus then."
                 (block (emrex--block frame)))
       (emrex--focus frame block))))
 
+;;;; Sizes
+
+(defvar emrex--resync-timer nil
+  "Timer that makes Emacs read its terminals' sizes again.")
+
+(defun emrex--resync-sizes ()
+  "Make Emacs read the size of every terminal again."
+  (setq emrex--resync-timer nil)
+  (signal-process (emacs-pid) 'SIGWINCH))
+
+(defun emrex--resync-sizes-h (frame)
+  "Read terminal sizes again shortly after pane FRAME changes size.
+When Rex resizes several panes at once, each pane's emacsclient signals
+Emacs, and a signal that arrives while Emacs applies an earlier one can
+be dropped, leaving a frame at its old size.  Reading the sizes again
+once things are quiet repairs it; when they already agree, nothing
+changes and this isn't called again."
+  (when (emrex--block frame)
+    (when emrex--resync-timer
+      (cancel-timer emrex--resync-timer))
+    (setq emrex--resync-timer
+          (run-with-timer 0.2 nil #'emrex--resync-sizes))))
+
 ;;;; display-buffer
 
 (defun emrex-display-buffer (buffer alist)
@@ -593,12 +616,14 @@ frames are unaffected.  See the Commentary of emrex.el."
       (progn
         (add-hook 'pre-command-hook #'emrex--note-frame-h)
         (add-hook 'post-command-hook #'emrex--follow-selection-h)
+        (add-hook 'window-size-change-functions #'emrex--resync-sizes-h)
         (pcase-dolist (`(,fn . ,advice) emrex--advice)
           (advice-add fn :around advice))
         (setq display-buffer-base-action (emrex--base-action t))
         (with-eval-after-load 'evil (emrex--define-only)))
     (remove-hook 'pre-command-hook #'emrex--note-frame-h)
     (remove-hook 'post-command-hook #'emrex--follow-selection-h)
+    (remove-hook 'window-size-change-functions #'emrex--resync-sizes-h)
     (pcase-dolist (`(,fn . ,advice) emrex--advice)
       (advice-remove fn advice))
     (setq display-buffer-base-action (emrex--base-action nil))
