@@ -3,7 +3,7 @@
 Emacs windows as real [Rex](https://www.superlogical.com/rex) panes: the
 Emacs counterpart of [neorex](https://github.com/alexrlocke/neorex).
 
-![Three Emacs panes in Rex, split with C-x 3 and C-x 2: emrex.el, its README and flake.nix, all on one Emacs server](assets/screenshot.png)
+![emrex demo: C-x 3 and C-x 2 open Emacs panes in Rex, C-x 4 f opens a file in another pane, C-x o moves between them and C-x 1 closes the others](assets/demo.gif)
 
 One Emacs server runs behind every pane, so buffers, registers, undo, the
 kill ring and language servers are shared. Each pane runs `emacsclient -t`:
