@@ -449,26 +449,22 @@ Not after the command's own frame went: Rex picks the pane to focus then."
 
 ;;;; Sizes
 
-(defvar emrex--resync-timer nil
-  "Timer that makes Emacs read its terminals' sizes again.")
+(defcustom emrex-size-check-interval 1.0
+  "Seconds between checks that each pane's frame matches its terminal size.
+Rex sometimes resizes several panes at once and Emacs drops one of the
+resulting size updates, leaving that frame drawn at its old size.  nil
+turns the check off."
+  :type '(choice (const :tag "Off" nil) number))
 
-(defun emrex--resync-sizes ()
-  "Make Emacs read the size of every terminal again."
-  (setq emrex--resync-timer nil)
-  (signal-process (emacs-pid) 'SIGWINCH))
+(defvar emrex--size-timer nil
+  "Timer for `emrex--refresh-sizes'.")
 
-(defun emrex--resync-sizes-h (frame)
-  "Read terminal sizes again shortly after pane FRAME changes size.
-When Rex resizes several panes at once, each pane's emacsclient signals
-Emacs, and a signal that arrives while Emacs applies an earlier one can
-be dropped, leaving a frame at its old size.  Reading the sizes again
-once things are quiet repairs it; when they already agree, nothing
-changes and this isn't called again."
-  (when (emrex--block frame)
-    (when emrex--resync-timer
-      (cancel-timer emrex--resync-timer))
-    (setq emrex--resync-timer
-          (run-with-timer 0.2 nil #'emrex--resync-sizes))))
+(defun emrex--refresh-sizes ()
+  "Ask Emacs to reread its terminals' sizes when a Rex pane is open.
+SIGWINCH makes Emacs compare each terminal's size with its frame's, and
+update only the frames that differ."
+  (when (seq-some (lambda (frame) (emrex--block frame)) (frame-list))
+    (signal-process (emacs-pid) 'SIGWINCH)))
 
 ;;;; display-buffer
 
@@ -616,14 +612,19 @@ frames are unaffected.  See the Commentary of emrex.el."
       (progn
         (add-hook 'pre-command-hook #'emrex--note-frame-h)
         (add-hook 'post-command-hook #'emrex--follow-selection-h)
-        (add-hook 'window-size-change-functions #'emrex--resync-sizes-h)
+        (when emrex-size-check-interval
+          (setq emrex--size-timer (run-with-timer emrex-size-check-interval
+                                                  emrex-size-check-interval
+                                                  #'emrex--refresh-sizes)))
         (pcase-dolist (`(,fn . ,advice) emrex--advice)
           (advice-add fn :around advice))
         (setq display-buffer-base-action (emrex--base-action t))
         (with-eval-after-load 'evil (emrex--define-only)))
     (remove-hook 'pre-command-hook #'emrex--note-frame-h)
     (remove-hook 'post-command-hook #'emrex--follow-selection-h)
-    (remove-hook 'window-size-change-functions #'emrex--resync-sizes-h)
+    (when emrex--size-timer
+      (cancel-timer emrex--size-timer)
+      (setq emrex--size-timer nil))
     (pcase-dolist (`(,fn . ,advice) emrex--advice)
       (advice-remove fn advice))
     (setq display-buffer-base-action (emrex--base-action nil))
