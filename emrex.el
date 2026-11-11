@@ -225,6 +225,22 @@ It execs the command on the first SIGWINCH, or after
           (format "trap 'exec \"$0\" \"$@\"' WINCH; sleep %s & wait; exec \"$0\" \"$@\""
                   emrex-resize-wait))))
 
+(defun emrex--frame-window (frame)
+  "The Rex window of FRAME's pane, asked of Rex once and kept on the frame.
+shortcut: a pane moved to another Rex window keeps the old id until it is
+recreated, so it can miss its siblings until then."
+  (or (frame-parameter frame 'emrex-window)
+      (when-let* (((emrex--block frame))
+                  (json (ignore-errors
+                          (emrex--rex frame "block" "inspect" (emrex--block frame)
+                                      "--json")))
+                  (window (alist-get 'window_id
+                                     (alist-get 'block
+                                                (json-parse-string json
+                                                                   :object-type 'alist)))))
+        (set-frame-parameter frame 'emrex-window window)
+        window)))
+
 (cl-defun emrex--spawn (window direction &key focus file read-only ratio)
   "Open a Rex pane DIRECTION of WINDOW's pane, running emacsclient.
 DIRECTION is \"left\", \"right\", \"above\" or \"below\".  The new pane
@@ -243,6 +259,8 @@ and packages such as kkp send it while setting it up."
                  :point (window-point window) :start (window-start window)
                  :file file :read-only read-only)
              emrex--spawns)
+    ;; A pane whose client never connects must not keep its spawn forever.
+    (run-with-timer 60 nil (lambda () (remhash id emrex--spawns)))
     (apply #'emrex--rex-async frame (lambda () (remhash id emrex--spawns))
            `("split" "--block" ,(emrex--block frame) "--split" ,direction
              ,(if focus "--focus=true" "--focus=false")
@@ -250,7 +268,8 @@ and packages such as kkp send it while setting it up."
              "--shell=none" "--"
              ,@(emrex--after-resize)
              ,(emrex--emacsclient) "-t" "-u" ,@(emrex--server-args)
-             "-e" ,(format "(emrex--adopt %d)" id)))
+             "-e" ,(format "(emrex--adopt %d %S)"
+                           id (emrex--frame-window frame))))
     nil))
 
 (defun emrex--share-perspective (origin frame)
@@ -267,13 +286,15 @@ doesn't kill it (Doom kills a frame's `workspace' when the frame goes)."
         (when (and own (null (persp-frames-with-persp own)))
           (persp-kill (safe-persp-name own) t))))))
 
-(defun emrex--adopt (id)
-  "Set up the selected frame as the pane of spawn ID.
+(defun emrex--adopt (id rex-window)
+  "Set up the selected frame as the pane of spawn ID, in Rex window REX-WINDOW.
 A new pane's emacsclient evaluates this once its frame exists."
   (when-let* ((spawn (gethash id emrex--spawns)))
     (remhash id emrex--spawns)
     (let* ((frame (selected-frame))
            (window (frame-selected-window frame)))
+      (when rex-window
+        (set-frame-parameter frame 'emrex-window rex-window))
       (condition-case err
           (progn
             (emrex--share-perspective (emrex--spawn-origin spawn) frame)
@@ -297,10 +318,13 @@ A new pane's emacsclient evaluates this once its frame exists."
 ;;;; Splitting
 
 (defun emrex--ratio (window direction lines)
-  "The --ratio giving a pane split DIRECTION from WINDOW's LINES or columns."
-  (let ((total (if (member direction '("left" "right"))
-                   (window-total-width window)
-                 (window-total-height window))))
+  "The --ratio giving a pane split DIRECTION from WINDOW's LINES or columns.
+Keep at least two cells for the new pane, so a narrow pane can't split into
+a zero-width one."
+  (let* ((total (if (member direction '("left" "right"))
+                    (window-total-width window)
+                  (window-total-height window)))
+         (lines (max 2 (min (1- total) lines))))
     (max 5 (min 95 (round (* 100.0 lines) total)))))
 
 (defun emrex--split (direction focus &optional lines file read-only)
@@ -355,32 +379,17 @@ Closing a pane's only window closes the pane, not the workspace."
     (call-interactively #'+workspace/close-window-or-workspace)))
 
 (defun emrex--other-panes (frame)
-  "The other managed frames in FRAME's Rex window, least recently used first.
-Asks Rex which window each is in only when FRAME's Rex session has other
-managed frames."
-  (let* ((session (getenv "REX_SESSION" frame))
-         (others (seq-filter (lambda (f)
-                               (and (not (eq f frame))
-                                    (emrex--block f)
-                                    (equal (getenv "REX_SESSION" f) session)))
-                             (frame-list))))
-    (when others
-      (let* ((blocks (alist-get 'blocks
-                                (json-parse-string
-                                 (emrex--rex frame "block" "ls" "--json"
-                                             "--session" session)
-                                 :object-type 'alist :array-type 'list)))
-             (rex-window (lambda (f)
-                           (alist-get 'window_id
-                                      (seq-find (lambda (b)
-                                                  (equal (alist-get 'block_id b)
-                                                         (emrex--block f)))
-                                                blocks))))
-             (here (funcall rex-window frame)))
-        (when here
-          (sort (seq-filter (lambda (f) (equal (funcall rex-window f) here))
-                            others)
-                :key (lambda (f) (window-use-time (frame-selected-window f)))))))))
+  "The other managed frames in FRAME's Rex window, least recently used first."
+  (let ((window (emrex--frame-window frame))
+        (session (getenv "REX_SESSION" frame)))
+    (when window
+      (sort (seq-filter (lambda (f)
+                          (and (not (eq f frame))
+                               (emrex--block f)
+                               (equal (getenv "REX_SESSION" f) session)
+                               (equal (emrex--frame-window f) window)))
+                        (frame-list))
+            :key (lambda (f) (window-use-time (frame-selected-window f)))))))
 
 (defun emrex--close-other-panes (frame)
   "Delete the other managed frames in FRAME's Rex window."
@@ -511,13 +520,20 @@ BUFFER in a window `display-buffer' may use, or with no other pane."
     (apply fn args)))
 
 (defun emrex--evil-close-a (fn &rest args)
-  "Close the pane when `evil-window-delete' or `evil-quit' ends its only window.
-`evil-quit' would otherwise fall back to `server-edit', which finishes
-the buffer for every client showing it, not just this pane's.  FN takes
-ARGS."
+  "Close the pane when `evil-window-delete' ends its only window.  FN takes ARGS."
   (if (emrex--sole-window-p)
       (delete-frame)
     (apply fn args)))
+
+(defun emrex--evil-quit-a (fn &rest args)
+  "Close the pane on `evil-quit', unless its buffer has unsaved changes.
+`evil-quit' would otherwise fall back to `server-edit', which finishes the
+buffer for every client showing it.  FN takes ARGS."
+  (cond ((not (emrex--sole-window-p)) (apply fn args))
+        ((buffer-modified-p (window-buffer (selected-window)))
+         (user-error "Buffer %s has unsaved changes"
+                     (buffer-name (window-buffer (selected-window)))))
+        (t (delete-frame))))
 
 (defun emrex--evil-step (direction fn args)
   "Step to the DIRECTION window through Rex, unless ARGS has a count for FN."
@@ -525,13 +541,12 @@ ARGS."
       (emrex--step direction)
     (apply fn args)))
 
-(defun emrex--evil-next-a (fn &rest args)
-  "Let `evil-window-next' reach other panes.  FN takes ARGS."
-  (emrex--evil-step 'next fn args))
-
-(defun emrex--evil-prev-a (fn &rest args)
-  "Let `evil-window-prev' reach other panes.  FN takes ARGS."
-  (emrex--evil-step 'prev fn args))
+(defmacro emrex--define-advice (name helper direction)
+  "Define NAME: call HELPER with DIRECTION for the matching evil-window command."
+  `(defun ,name (fn &rest args)
+     ,(format "Let `evil-window-%s' reach other panes.  FN takes ARGS."
+              direction)
+     (,helper ',direction fn args)))
 
 (defun emrex--evil-move (direction fn args)
   "Move DIRECTION through Rex, unless ARGS has a count above 1 for FN."
@@ -539,27 +554,18 @@ ARGS."
       (emrex--move direction)
     (apply fn args)))
 
-(defun emrex--evil-left-a (fn &rest args)
-  "Let `evil-window-left' reach other panes.  FN takes ARGS."
-  (emrex--evil-move 'left fn args))
-
-(defun emrex--evil-right-a (fn &rest args)
-  "Let `evil-window-right' reach other panes.  FN takes ARGS."
-  (emrex--evil-move 'right fn args))
-
-(defun emrex--evil-up-a (fn &rest args)
-  "Let `evil-window-up' reach other panes.  FN takes ARGS."
-  (emrex--evil-move 'up fn args))
-
-(defun emrex--evil-down-a (fn &rest args)
-  "Let `evil-window-down' reach other panes.  FN takes ARGS."
-  (emrex--evil-move 'down fn args))
+(emrex--define-advice emrex--evil-next-a emrex--evil-step next)
+(emrex--define-advice emrex--evil-prev-a emrex--evil-step prev)
+(emrex--define-advice emrex--evil-left-a emrex--evil-move left)
+(emrex--define-advice emrex--evil-right-a emrex--evil-move right)
+(emrex--define-advice emrex--evil-up-a emrex--evil-move up)
+(emrex--define-advice emrex--evil-down-a emrex--evil-move down)
 
 (defconst emrex--advice
   '((evil-window-split . emrex--evil-split-a)
     (evil-window-vsplit . emrex--evil-vsplit-a)
     (evil-window-delete . emrex--evil-close-a)
-    (evil-quit . emrex--evil-close-a)
+    (evil-quit . emrex--evil-quit-a)
     (evil-window-next . emrex--evil-next-a)
     (evil-window-prev . emrex--evil-prev-a)
     (evil-window-left . emrex--evil-left-a)
