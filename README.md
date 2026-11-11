@@ -72,6 +72,11 @@ Start the Emacs server, turn on `emrex-mode`, and run `emacsclient -t` in a
 Rex pane. A plain `emacs -nw` is not affected: new panes have to connect to
 a server.
 
+Rex starts a new pane's terminal at 80x24 and resizes it a moment later, so
+a new pane waits for that resize (at most `emrex-resize-wait`, 1 second)
+before starting `emacsclient`. Emacs then draws once, at the right size,
+instead of drawing and reflowing.
+
 Turn off Rex's setting that auto-balances splits if you want `C-u 20 C-x 2`
 style sizes kept.
 

@@ -92,6 +92,14 @@ nil means the one installed beside this Emacs, then `emacsclient' on
 variable `exec-path'."
   :type '(choice (const :tag "Beside this Emacs" nil) file))
 
+(defcustom emrex-resize-wait 1.0
+  "Seconds a new pane waits for Rex to size it before starting emacsclient.
+Rex starts a pane's terminal at 80x24 and resizes it a moment later;
+starting emacsclient after that keeps the new frame from drawing at the
+wrong size and then reflowing.  The pane starts as soon as the resize
+arrives, or after this many seconds when none does.  nil starts at once."
+  :type '(choice (const :tag "Start at once" nil) number))
+
 ;;;; Panes
 
 (defun emrex--block (&optional frame)
@@ -208,6 +216,15 @@ If it fails, report why and call ON-FAILURE, unless that is nil."
       (list "-f" (expand-file-name server-name server-auth-dir))
     (list "-s" (expand-file-name server-name server-socket-dir))))
 
+(defun emrex--after-resize ()
+  "Command prefix that runs the rest once the pane's terminal is resized.
+It execs the command on the first SIGWINCH, or after
+`emrex-resize-wait' seconds; empty when that is nil."
+  (when emrex-resize-wait
+    (list "/bin/sh" "-c"
+          (format "trap 'exec \"$0\" \"$@\"' WINCH; sleep %s & wait; exec \"$0\" \"$@\""
+                  emrex-resize-wait))))
+
 (cl-defun emrex--spawn (window direction &key focus file read-only ratio)
   "Open a Rex pane DIRECTION of WINDOW's pane, running emacsclient.
 DIRECTION is \"left\", \"right\", \"above\" or \"below\".  The new pane
@@ -231,6 +248,7 @@ and packages such as kkp send it while setting it up."
              ,(if focus "--focus=true" "--focus=false")
              ,@(and ratio (list "--ratio" (number-to-string ratio)))
              "--shell=none" "--"
+             ,@(emrex--after-resize)
              ,(emrex--emacsclient) "-t" "-u" ,@(emrex--server-args)
              "-e" ,(format "(emrex--adopt %d)" id)))
     nil))
